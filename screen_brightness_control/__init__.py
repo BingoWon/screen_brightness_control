@@ -3,8 +3,7 @@ import platform
 import threading
 import time
 import traceback
-import warnings
-from dataclasses import dataclass, field, fields
+from dataclasses import dataclass, field
 from types import ModuleType
 from typing import Callable, Any, Dict, List, Optional, Tuple, Type, Union, FrozenSet, ClassVar
 from ._version import __author__, __version__  # noqa: F401
@@ -377,7 +376,7 @@ class Display():
         logarithmic: bool = True,
         blocking: bool = True,
         stoppable: bool = True
-    ) -> Union[threading.Thread, IntPercentage]:
+    ) -> Optional[threading.Thread]:
         '''
         Gradually change the brightness of this display to a set value.
         Can execute in the current thread, blocking until completion,
@@ -401,10 +400,7 @@ class Display():
         Returns:
             If `blocking` is `False`, returns a `threading.Thread` object representing the
             thread in which the fade operation is running.
-            If `blocking` is `True`, returns the current brightness level after the fade operation completes.
-
-            .. warning:: Deprecated
-               This function will return `None` in v0.23.0 and later.
+            Otherwise, it returns None.
         '''
         thread = threading.Thread(target=self._fade_brightness, args=(finish,), kwargs={
             'start': start,
@@ -420,7 +416,7 @@ class Display():
             return thread
         else:
             thread.join()
-            return self.get_brightness()
+            return None
 
     def _fade_brightness(
         self,
@@ -432,27 +428,6 @@ class Display():
         logarithmic: bool = True,
         stoppable: bool = True
     ) -> None:
-        '''
-        Gradually change the brightness of this display to a set value.
-        This works by incrementally changing the brightness until the desired
-        value is reached.
-
-        Args:
-            finish (.types.Percentage): the brightness level to end up on
-            start (.types.Percentage): where the fade should start from. Defaults
-                to whatever the current brightness level for the display is
-            interval: time delay between each change in brightness
-            increment: amount to change the brightness by each time (as a percentage)
-            force: [*Linux only*] allow the brightness to be set to 0. By default,
-                brightness values will never be set lower than 1, since setting them to 0
-                often turns off the backlight
-            logarithmic: follow a logarithmic curve when setting brightness values.
-                See `logarithmic_range` for rationale
-            stoppable: whether the fade can be stopped by starting a new fade on the same display
-
-        Returns:
-            None
-        '''
         # Record the latest thread for this display so that other stoppable threads can be stopped
         display_key = frozenset((self.method, self.index))
         self._fade_thread_dict[display_key] = threading.current_thread()
@@ -551,7 +526,7 @@ class Display():
             return True
         except Exception as e:
             self._logger.error(
-                f'Monitor.is_active: {self.get_identifier()} failed get_brightness call'
+                f'Display.is_active: {self.get_identifier()} failed get_brightness call'
                 f' - {format_exc(e)}'
             )
             return False
@@ -578,200 +553,6 @@ class Display():
         )
 
         self.method.set_brightness(value, display=self.index)
-
-
-class Monitor(Display):
-    '''
-    Legacy class for managing displays.
-
-    .. warning:: Deprecated
-       Deprecated for removal in v0.23.0. Please use the new `Display` class instead
-    '''
-
-    def __init__(self, display: Union[int, str, dict]):
-        '''
-        Args:
-            display (.types.DisplayIdentifier or dict): the display you
-                wish to control. Is passed to `filter_monitors`
-                to decide which display to use.
-
-        Example:
-            ```python
-            import screen_brightness_control as sbc
-
-            # create a class for the primary display and then a specifically named monitor
-            primary = sbc.Monitor(0)
-            benq_monitor = sbc.Monitor('BenQ GL2450H')
-
-            # check if the benq monitor is the primary one
-            if primary.serial == benq_monitor.serial:
-                print('BenQ GL2450H is the primary display')
-            else:
-                print('The primary display is', primary.name)
-            ```
-        '''
-        warnings.warn(
-            (
-                '`Monitor` is deprecated for removal in v0.23.0.'
-                ' Please use the new `Display` class instead'
-            ),
-            DeprecationWarning
-        )
-
-        monitors_info = list_monitors_info(allow_duplicates=True)
-        if isinstance(display, dict):
-            if display in monitors_info:
-                info = display
-            else:
-                info = filter_monitors(
-                    display=self.get_identifier(display)[1],
-                    haystack=monitors_info
-                )[0]
-        else:
-            info = filter_monitors(display=display, haystack=monitors_info)[0]
-
-        # make a copy so that we don't alter the dict in-place
-        info = info.copy()
-
-        kw = [i.name for i in fields(Display) if i.init]
-        super().__init__(**{k: v for k, v in info.items() if k in kw})
-
-        # this assigns any extra info that is returned to this class
-        # eg: the 'interface' key in XRandr monitors on Linux
-        for key, value in info.items():
-            if key not in kw and value is not None:
-                setattr(self, key, value)
-
-    def get_identifier(self, monitor: Optional[dict] = None) -> Tuple[str, DisplayIdentifier]:
-        '''
-        Returns the `.types.DisplayIdentifier` for this display.
-        Will iterate through the EDID, serial, name and index and return the first
-        value that is not equal to None
-
-        Args:
-            monitor: extract an identifier from this dict instead of the monitor class
-
-        Returns:
-            A tuple containing the name of the property returned and the value of said
-            property. EG: `('serial', '123abc...')` or `('name', 'BenQ GL2450H')`
-
-        Example:
-            ```python
-            import screen_brightness_control as sbc
-            primary = sbc.Monitor(0)
-            print(primary.get_identifier())  # eg: ('serial', '123abc...')
-
-            secondary = sbc.list_monitors_info()[1]
-            print(primary.get_identifier(monitor=secondary))  # eg: ('serial', '456def...')
-
-            # you can also use the class uninitialized
-            print(sbc.Monitor.get_identifier(secondary))  # eg: ('serial', '456def...')
-            ```
-        '''
-        if monitor is None:
-            if isinstance(self, dict):
-                monitor = self
-            else:
-                return super().get_identifier()
-
-        for key in ('edid', 'serial', 'name'):
-            value = monitor[key]
-            if value is not None:
-                return key, value
-        return 'index', self.index
-
-    def set_brightness(
-        self,
-        value: Percentage,
-        no_return: bool = True,
-        force: bool = False
-    ) -> Optional[IntPercentage]:
-        '''
-        Wrapper for `Display.set_brightness`
-
-        Args:
-            value: see `Display.set_brightness`
-            no_return: do not return the new brightness after it has been set
-            force: see `Display.set_brightness`
-        '''
-        # refresh display info, in case another display has been unplugged or something
-        # which would change the index of this display
-        self.get_info()
-        super().set_brightness(value, force)
-        if no_return:
-            return None
-        return self.get_brightness()
-
-    def get_brightness(self) -> IntPercentage:
-        # refresh display info, in case another display has been unplugged or something
-        # which would change the index of this display
-        self.get_info()
-        return super().get_brightness()
-
-    def fade_brightness(
-        self,
-        *args,
-        blocking: bool = True,
-        **kwargs
-    ) -> Union[threading.Thread, IntPercentage]:
-        '''
-        Wrapper for `Display.fade_brightness`
-
-        Args:
-            *args: see `Display.fade_brightness`
-            blocking: run this function in the current thread and block until
-                it completes. If `False`, the fade will be run in a new daemonic
-                thread, which will be started and returned
-            **kwargs: see `Display.fade_brightness`
-        '''
-        if blocking:
-            super().fade_brightness(*args, **kwargs)
-            return self.get_brightness()
-
-        thread = threading.Thread(
-            target=super().fade_brightness, args=args, kwargs=kwargs, daemon=True)
-        thread.start()
-        return thread
-
-    @classmethod
-    def from_dict(cls, display) -> 'Monitor':
-        return cls(display)
-
-    def get_info(self, refresh: bool = True) -> dict:
-        '''
-        Returns all known information about this monitor instance
-
-        Args:
-            refresh: whether to refresh the information
-                or to return the cached version
-
-        Example:
-            ```python
-            import screen_brightness_control as sbc
-
-            # initialize class for primary display
-            primary = sbc.Monitor(0)
-            # get the info
-            info = primary.get_info()
-            ```
-        '''
-        def vars_self():
-            return {k: v for k, v in vars(self).items() if not k.startswith('_')}
-
-        if not refresh:
-            return vars_self()
-
-        identifier = self.get_identifier()
-
-        if identifier is not None:
-            # refresh the info we have on this monitor
-            info = filter_monitors(
-                display=identifier[1], method=self.method.__name__)[0]
-            for key, value in info.items():
-                if value is not None:
-                    setattr(self, key, value)
-
-        return vars_self()
 
 
 @config.default_params
